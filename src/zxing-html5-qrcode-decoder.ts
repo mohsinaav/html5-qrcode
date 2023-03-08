@@ -14,6 +14,7 @@ import * as ZXing from "../third_party/zxing-js.umd";
 
 import {
     QrcodeResult,
+    QrcodeResultDebugData,
     QrcodeResultFormat,
     Html5QrcodeSupportedFormats,
     Logger,
@@ -75,8 +76,11 @@ export class ZXingHtml5QrcodeDecoder implements QrcodeDecoderAsync {
         const formats = this.createZXingFormats(requestedFormats);
         const hints = new Map();
         hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+        // TODO(minhazav): Make this configurable by developers.
+        hints.set(ZXing.DecodeHintType.TRY_HARDER, false);
         this.hints = hints;
     }
+
 
     decodeAsync(canvas: HTMLCanvasElement): Promise<QrcodeResult> {
         return new Promise((resolve, reject) => {
@@ -107,7 +111,8 @@ export class ZXingHtml5QrcodeDecoder implements QrcodeDecoderAsync {
         return {
             text: result.text,
             format: QrcodeResultFormat.create(
-                this.toHtml5QrcodeSupportedFormats(result.format))
+                this.toHtml5QrcodeSupportedFormats(result.format)),
+                debugData: this.createDebugData()
         };
     }
 
@@ -142,5 +147,9 @@ export class ZXingHtml5QrcodeDecoder implements QrcodeDecoderAsync {
                 }
             }
             return zxingFormats;
+    }
+
+    private createDebugData(): QrcodeResultDebugData {
+        return { decoderName: "zxing-js" };
     }
 }

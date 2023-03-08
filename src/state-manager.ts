@@ -9,7 +9,7 @@
 export enum Html5QrcodeScannerState {
     // Invalid internal state, do not set to this state.
     UNKNOWN = 0,
-    // Indicates the sanning is not running or user is using file based
+    // Indicates the scanning is not running or user is using file based
     // scanning.
     NOT_STARTED = 1,
     // Camera scan is running.
@@ -115,7 +115,7 @@ class StateManagerImpl implements StateManager, StateManagerTransaction {
     private failIfTransitionOngoing() {
         if (this.onGoingTransactionNewState 
             !== Html5QrcodeScannerState.UNKNOWN) {
-            throw "Cannnot transition to a new state, already under transition"; 
+            throw "Cannot transition to a new state, already under transition"; 
          }
     }
 

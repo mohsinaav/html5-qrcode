@@ -13,7 +13,6 @@
  */
 
 import {
-    CameraDevice,
     QrcodeErrorCallback,
     QrcodeSuccessCallback,
     Logger,
@@ -21,21 +20,27 @@ import {
     Html5QrcodeResultFactory,
     Html5QrcodeErrorFactory,
     Html5QrcodeSupportedFormats,
-    QrcodeDecoderAsync,
+    RobustQrcodeDecoderAsync,
     isValidHtml5QrcodeSupportedFormats,
     Html5QrcodeConstants,
     Html5QrcodeResult,
     isNullOrUndefined,
-    QrDimensions
+    QrDimensions,
+    QrDimensionFunction
 } from "./core";
-
 import { Html5QrcodeStrings } from "./strings";
 import { VideoConstraintsUtil } from "./utils";
 import { Html5QrcodeShim } from "./code-decoder";
+import { CameraFactory } from "./camera/factories";
 import {
-    ExperimentalFeaturesConfig,
-    ExperimentalFeaturesConfigFactory
-} from "./experimental-features";
+    CameraDevice,
+    CameraCapabilities,
+    CameraRenderingOptions,
+    RenderedCamera,
+    RenderingCallbacks
+} from "./camera/core";
+import { CameraRetriever } from "./camera/retriever";
+import { ExperimentalFeaturesConfig } from "./experimental-features";
 import {
     StateManagerProxy,
     StateManagerFactory,
@@ -50,6 +55,7 @@ class Constants extends Html5QrcodeConstants {
     static DEFAULT_WIDTH = 300;
     static DEFAULT_WIDTH_OFFSET = 2;
     static FILE_SCAN_MIN_HEIGHT = 300;
+    static FILE_SCAN_HIDDEN_CANVAS_PADDING = 100;
     static MIN_QR_BOX_SIZE = 50;
     static SHADED_LEFT = 1;
     static SHADED_RIGHT = 2;
@@ -75,6 +81,20 @@ export interface Html5QrcodeConfigs {
      * this value.
      */
     formatsToSupport?: Array<Html5QrcodeSupportedFormats> | undefined;
+
+    /**
+     * {@class BarcodeDetector} is being implemented by browsers at the moment.
+     * It has very limited browser support but as it gets available it could
+     * enable faster native code scanning experience.
+     * 
+     * Set this flag to true, to enable using {@class BarcodeDetector} if
+     * supported. This is true by default.
+     * 
+     * Documentations:
+     *  - https://developer.mozilla.org/en-US/docs/Web/API/BarcodeDetector
+     *  - https://web.dev/shape-detection/#barcodedetector
+     */
+    useBarCodeDetectorIfSupported?: boolean | undefined;
 
     /**
      * Config for experimental features.
@@ -111,8 +131,10 @@ export interface Html5QrcodeCameraScanConfig {
     fps: number | undefined;
 
     /**
-     * Optional, edge size or dimension of QR scanning box, this should be 
-     * smaller than the width and height of the full region.
+     * Optional, edge size, dimension or calculator function for QR scanning
+     * box, the value or computed value should be smaller than the width and
+     * height of the full region.
+     * 
      * This would make the scanner look like this:
      *          ----------------------
      *          |********************|
@@ -125,12 +147,14 @@ export interface Html5QrcodeCameraScanConfig {
      *          ----------------------
      * 
      * Instance of {@interface QrDimensions} can be passed to construct a non
-     * square rendering of scanner box.
+     * square rendering of scanner box. You can also pass in a function of type
+     * {@type QrDimensionFunction} that takes in the width and height of the
+     * video stream and return QR box size of type {@interface QrDimensions}.
      * 
      * If this value is not set, no shaded QR box will be rendered and the
      * scanner will scan the entire area of video stream.
      */
-    qrbox?: number | QrDimensions | undefined;
+    qrbox?: number | QrDimensions | QrDimensionFunction | undefined;
 
     /**
      * Optional, Desired aspect ratio for the video feed. Ideal aspect ratios
@@ -164,14 +188,13 @@ export interface Html5QrcodeCameraScanConfig {
  * Internal implementation of {@interface Html5QrcodeConfig} with util & factory
  * methods.
  */
-class InternalHtml5QrcodeConfig implements InternalHtml5QrcodeConfig {
+class InternalHtml5QrcodeConfig implements Html5QrcodeCameraScanConfig {
 
-    // TODO(mebjas) Make items that doesn't need to be public private.
-    public fps: number;
-    public disableFlip: boolean;
-    public qrbox: number | QrDimensions | undefined;
-    public aspectRatio: number | undefined;
-    public videoConstraints: MediaTrackConstraints | undefined;
+    public readonly fps: number;
+    public readonly disableFlip: boolean;
+    public readonly qrbox: number | QrDimensions | QrDimensionFunction | undefined;
+    public readonly aspectRatio: number | undefined;
+    public readonly videoConstraints: MediaTrackConstraints | undefined;
 
     private logger: Logger;
 
@@ -230,14 +253,15 @@ interface QrcodeRegionBounds {
 export class Html5Qrcode {
 
     //#region Private fields.
-    private elementId: string;
-    private verbose: boolean;
-    private qrcode: QrcodeDecoderAsync;
+    private readonly logger: Logger;
+    private readonly elementId: string;
+    private readonly verbose: boolean;
+    private readonly qrcode: RobustQrcodeDecoderAsync;
+
     private shouldScan: boolean;
-    private logger: Logger;
 
     // Nullable elements
-    // TODO(mebjas): Reduce the statefulness of this mammoth class, by splitting
+    // TODO(mebjas): Reduce the state-fulness of this mammoth class, by splitting
     // into independent classes for better separation of concerns and reducing
     // error prone nature of a large stateful class.
     private element: HTMLElement | null = null;
@@ -246,9 +270,9 @@ export class Html5Qrcode {
     private hasBorderShaders: boolean | null = null;
     private borderShaders: Array<HTMLElement> | null = null;
     private qrMatch: boolean | null = null;
-    private videoElement: HTMLVideoElement | null = null;
+    private renderedCamera: RenderedCamera | null = null;
+
     private foreverScanTimeout: any;
-    private localMediaStream: MediaStream | null = null;
     private qrRegion: QrcodeRegionBounds | null = null;
     private context: CanvasRenderingContext2D | null = null;
     private lastScanImageFile: string | null = null;
@@ -282,32 +306,32 @@ export class Html5Qrcode {
 
         this.elementId = elementId;
         this.verbose = false;
-        let experimentalFeatureConfig;
         
+        let experimentalFeatureConfig : ExperimentalFeaturesConfig | undefined;
+        let configObject: Html5QrcodeFullConfig | undefined;
         if (typeof configOrVerbosityFlag == "boolean") {
             this.verbose = configOrVerbosityFlag === true;
         } else if (configOrVerbosityFlag) {
-            this.verbose = configOrVerbosityFlag.verbose === true;
-            experimentalFeatureConfig = configOrVerbosityFlag.experimentalFeatures;
+            configObject = configOrVerbosityFlag;
+            this.verbose = configObject.verbose === true;
+            experimentalFeatureConfig = configObject.experimentalFeatures;
         }
         
         this.logger = new BaseLoggger(this.verbose);
         this.qrcode = new Html5QrcodeShim(
             this.getSupportedFormats(configOrVerbosityFlag),
+            this.getUseBarCodeDetectorIfSupported(configObject),
             this.verbose,
-            this.logger,
-            ExperimentalFeaturesConfigFactory.createExperimentalFeaturesConfig(
-                experimentalFeatureConfig));
+            this.logger);
 
         this.foreverScanTimeout;
-        this.localMediaStream;
         this.shouldScan = true;
         this.stateManagerProxy = StateManagerFactory.create();
     }
 
     //#region start()
     /**
-     * Start scanning QR codes or barcodes for a given camera.
+     * Start scanning QR codes or bar codes for a given camera.
      * 
      * @param cameraIdOrConfig Identifier of the camera, it can either be the
      *  camera id retrieved from {@code Html5Qrcode#getCameras()} method or
@@ -338,8 +362,12 @@ export class Html5Qrcode {
             throw "qrCodeSuccessCallback is required and should be a function.";
         }
 
-        if (!qrCodeErrorCallback) {
-            qrCodeErrorCallback = this.verbose ? this.logger.log : () => {};
+        let qrCodeErrorCallbackInternal: QrcodeErrorCallback;
+        if (qrCodeErrorCallback) {
+            qrCodeErrorCallbackInternal = qrCodeErrorCallback;
+        } else {
+            qrCodeErrorCallbackInternal
+                = this.verbose ? this.logger.log : () => {};
         }
 
         const internalConfig = InternalHtml5QrcodeConfig.create(
@@ -361,7 +389,6 @@ export class Html5Qrcode {
         const areVideoConstraintsEnabled = videoConstraintsAvailableAndValid;
 
         // qr shaded box
-        const isShadedBoxEnabled = internalConfig.isShadedBoxEnabled();
         const element = document.getElementById(this.elementId)!;
         const rootElementWidth = element.clientWidth
             ? element.clientWidth : Constants.DEFAULT_WIDTH;
@@ -370,14 +397,10 @@ export class Html5Qrcode {
         this.shouldScan = true;
         this.element = element;
 
-        // Validate before insertion
-        if (isShadedBoxEnabled) {
-            this.validateQrboxSize(internalConfig, rootElementWidth);
-        }
-
         const $this = this;
         const toScanningStateChangeTransaction: StateManagerTransaction
-            = this.stateManagerProxy.startTransition(Html5QrcodeScannerState.SCANNING);
+            = this.stateManagerProxy.startTransition(
+                Html5QrcodeScannerState.SCANNING);
         return new Promise((resolve, reject) => {
             const videoConstraints = areVideoConstraintsEnabled
                     ? internalConfig.videoConstraints
@@ -387,39 +410,48 @@ export class Html5Qrcode {
                 reject("videoConstraints should be defined");
                 return;
             }
-            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                // Ignore all other video constraints if the videoConstraints
-                // is passed.
-                navigator.mediaDevices.getUserMedia(
-                    {
-                        audio: false,
-                        video: videoConstraints
-                    }).then((stream) => {
-                        $this.onMediaStreamReceived(
-                            stream,
-                            internalConfig,
-                            areVideoConstraintsEnabled,
-                            rootElementWidth,
-                            qrCodeSuccessCallback,
-                            qrCodeErrorCallback!)
-                            .then((_) => {
-                                toScanningStateChangeTransaction.execute();
-                                $this.isScanning = true;
-                                resolve(/* Void */ null);
-                            })
-                            .catch((error) => {
-                                toScanningStateChangeTransaction.cancel();
-                                reject(error);
-                            });
-                    })
-                    .catch((error) => {
-                        toScanningStateChangeTransaction.cancel();
-                        reject(Html5QrcodeStrings.errorGettingUserMedia(error));
-                    });
-            } else {
+
+            let cameraRenderingOptions: CameraRenderingOptions = {};
+            if (!areVideoConstraintsEnabled || internalConfig.aspectRatio) {
+                cameraRenderingOptions.aspectRatio = internalConfig.aspectRatio;
+            }
+
+            let renderingCallbacks: RenderingCallbacks = {
+                onRenderSurfaceReady: (viewfinderWidth, viewfinderHeight) => {
+                    $this.setupUi(
+                        viewfinderWidth, viewfinderHeight, internalConfig);
+
+                    $this.isScanning = true;
+                    $this.foreverScan(
+                        internalConfig,
+                        qrCodeSuccessCallback,
+                        qrCodeErrorCallbackInternal!);
+                }
+            };
+
+
+            // TODO(minhazav): Flatten this flow.
+            CameraFactory.failIfNotSupported().then((factory) => {
+                factory.create(videoConstraints).then((camera) => {
+                    return camera.render(
+                        this.element!, cameraRenderingOptions, renderingCallbacks)
+                        .then((renderedCamera) => {
+                            $this.renderedCamera = renderedCamera;
+                            toScanningStateChangeTransaction.execute();
+                            resolve(/* Void */ null);
+                        })
+                        .catch((error) => {
+                            toScanningStateChangeTransaction.cancel();
+                            reject(error);
+                        });
+                }).catch((error) => {
+                    toScanningStateChangeTransaction.cancel();
+                    reject(Html5QrcodeStrings.errorGettingUserMedia(error));
+                });
+            }).catch((_) => {
                 toScanningStateChangeTransaction.cancel();
                 reject(Html5QrcodeStrings.cameraStreamingNotSupported());
-            }
+            });
         });
     }
     //#endregion
@@ -444,8 +476,8 @@ export class Html5Qrcode {
             shouldPauseVideo = false;
         }
 
-        if (shouldPauseVideo && this.videoElement) {
-            this.videoElement.pause();
+        if (shouldPauseVideo && this.renderedCamera) {
+            this.renderedCamera.pause();
         }
     }
 
@@ -466,8 +498,8 @@ export class Html5Qrcode {
             throw "Cannot result, scanner is not paused.";
         }
 
-        if (!this.videoElement) {
-            throw "VideoElement doesn't exist while trying resume()";
+        if (!this.renderedCamera) {
+            throw "renderedCamera doesn't exist while trying resume()";
         }
 
         const $this = this;
@@ -477,21 +509,14 @@ export class Html5Qrcode {
             $this.hidePausedState();
         }
 
-        let isVideoPaused = this.videoElement.paused;
-        if (!isVideoPaused) {
+        if (!this.renderedCamera.isPaused()) {
             transitionToScanning();
             return;
         }
-
-        // Transition state, when the video playback has resumed
-        // in case it was paused.
-        const onVideoResume = () => {
-            // Transition after 300ms to avoid the previous canvas frame being rescanned.
-            setTimeout(transitionToScanning, 200);
-            $this.videoElement?.removeEventListener("playing", onVideoResume);
-        }
-        this.videoElement.addEventListener("playing", onVideoResume);
-        this.videoElement.play();
+        this.renderedCamera.resume(() => {
+            // Transition state, when the video playback has resumed.
+            transitionToScanning();
+        });
     }
 
     /**
@@ -533,45 +558,27 @@ export class Html5Qrcode {
             }
          };
 
-        return new Promise((resolve, _) => {
-            const onAllTracksClosed = () => {
-                this.localMediaStream = null;
-                if (this.element) {
-                    this.element.removeChild(this.videoElement!);
-                    this.element.removeChild(this.canvasElement!);
-                }
+        let $this = this;
+        return this.renderedCamera!.close().then(() => {
+            $this.renderedCamera = null;
 
-                removeQrRegion();
-                if (this.qrRegion) {
-                    this.qrRegion = null;
-                }
-                if (this.context) {
-                    this.context = null;
-                }
-
-                toStoppedStateTransaction.execute();
-                this.hidePausedState();
-                this.isScanning = false;
-                resolve();
-            };
-
-            if (!this.localMediaStream) {
-                onAllTracksClosed();
+            if ($this.element) {
+                $this.element.removeChild($this.canvasElement!);
+                $this.canvasElement = null;
             }
 
-            const tracksToClose
-                = this.localMediaStream!.getVideoTracks().length;
-            var tracksClosed = 0;
+            removeQrRegion();
+            if ($this.qrRegion) {
+                $this.qrRegion = null;
+            }
+            if ($this.context) {
+                $this.context = null;
+            }
 
-            this.localMediaStream!.getVideoTracks().forEach((videoTrack) => {
-                this.localMediaStream!.removeTrack(videoTrack);
-                videoTrack.stop();
-                ++tracksClosed;
-
-                if (tracksClosed >= tracksToClose) {
-                    onAllTracksClosed();
-                }
-            });
+            toStoppedStateTransaction.execute();
+            $this.hidePausedState();
+            $this.isScanning = false;
+            return Promise.resolve();
         });
     }
     //#endregion
@@ -675,27 +682,41 @@ export class Html5Qrcode {
                         /* dHeight= */ config.height);
                 }
 
+                // Hidden canvas should be at-least as big as the image.
+                // This could get really troublesome for large images like 12MP
+                // images or 48MP images captured on phone.
+                let padding = Constants.FILE_SCAN_HIDDEN_CANVAS_PADDING;
+                let hiddenImageWidth = Math.max(inputImage.width, config.width);
+                let hiddenImageHeight = Math.max(inputImage.height, config.height);
+
+                let hiddenCanvasWidth = hiddenImageWidth + 2 * padding;
+                let hiddenCanvasHeight = hiddenImageHeight + 2 * padding;
+
+                // Try harder for file scan.
+                // TODO(minhazav): Fallback to mirroring, 90 degree rotation and
+                //  color inversion.
                 const hiddenCanvas = this.createCanvasElement(
-                    config.width, config.height);
+                    hiddenCanvasWidth, hiddenCanvasHeight);
                 element.appendChild(hiddenCanvas);
                 const context = hiddenCanvas.getContext("2d");
                 if (!context) {
                     throw "Unable to get 2d context from canvas";
                 }
-                context.canvas.width = config.width;
-                context.canvas.height = config.height;
+
+                context.canvas.width = hiddenCanvasWidth;
+                context.canvas.height = hiddenCanvasHeight;
                 context.drawImage(
                     inputImage,
                     /* sx= */ 0,
                     /* sy= */ 0,
                     /* sWidth= */ imageWidth,
                     /* sHeight= */ imageHeight,
-                    /* dx= */ 0,
-                    /* dy= */  0,
-                    /* dWidth= */ config.width,
-                    /* dHeight= */ config.height);
+                    /* dx= */ padding,
+                    /* dy= */  padding,
+                    /* dWidth= */ hiddenImageWidth,
+                    /* dHeight= */ hiddenImageHeight);
                 try {
-                    this.qrcode.decodeAsync(hiddenCanvas)
+                    this.qrcode.decodeRobustlyAsync(hiddenCanvas)
                         .then((result) => {
                             resolve(
                                 Html5QrcodeResultFactory.createFromQrcodeResult(
@@ -726,57 +747,49 @@ export class Html5Qrcode {
         this.clearElement();
     }
 
-    /**
-     * Returns a Promise with list of all cameras supported by the device.
-     *
-     * @returns a Promise with list of {@code CameraDevice}.
-     */
+    /** Returns list of {@link CameraDevice} supported by the device. */
     public static getCameras(): Promise<Array<CameraDevice>> {
-        if (navigator.mediaDevices) {
-            return Html5Qrcode.getCamerasFromMediaDevices();
-        }
-        
-        // Using deprecated api to support really old browsers.
-        var mst = <any>MediaStreamTrack;
-        if (MediaStreamTrack && mst.getSources) {
-            return Html5Qrcode.getCamerasFromMediaStreamTrack();
-        }
-
-        // This can potentially happen if the page is loaded without SSL.
-        const isHttpsOrLocalhost = (): boolean => {
-            if (location.protocol === "https:") {
-                return true;
-            }
-            const host = location.host.split(":")[0];
-            return host === "127.0.0.1" || host === "localhost";
-        }
-
-        let errorMessage = Html5QrcodeStrings.unableToQuerySupportedDevices();
-        if (!isHttpsOrLocalhost()) {
-            errorMessage = Html5QrcodeStrings.insecureContextCameraQueryError();
-        }
-        return Promise.reject(errorMessage);
+        return CameraRetriever.retrieve();
     }
 
     /**
      * Returns the capabilities of the running video track.
+     * 
+     * Read more: https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack/getConstraints
+     * 
+     * Important:
+     *  1. Must be called only if the camera based scanning is in progress.
      *
-     * @beta This is an experimental API
-     * @returns the capabilities of a running video track.
      * @throws error if the scanning is not in running state.
      */
     public getRunningTrackCapabilities(): MediaTrackCapabilities {
-        if (this.localMediaStream == null) {
-            throw "Scanning is not in running state, call this API only when"
-                + " QR code scanning using camera is in running state.";
-        }
+        return this.getRenderedCameraOrFail().getRunningTrackCapabilities();
+    }
 
-        if (this.localMediaStream.getVideoTracks().length === 0) {
-            throw "No video tracks found";
-        }
+    /**
+     * Returns the object containing the current values of each constrainable
+     * property of the running video track.
+     * 
+     * Read more: https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack/getSettings
+     * 
+     * Important:
+     *  1. Must be called only if the camera based scanning is in progress.
+     *
+     * @throws error if the scanning is not in running state.
+     */
+    public getRunningTrackSettings(): MediaTrackSettings {
+        return this.getRenderedCameraOrFail().getRunningTrackSettings();
+    }
 
-        const videoTrack = this.localMediaStream.getVideoTracks()[0];
-        return videoTrack.getCapabilities();
+    /**
+     * Returns {@link CameraCapabilities} of the running video track.
+     * 
+     * TODO(minhazav): Document this API, currently hidden.
+     *
+     * @throws error if the scanning is not in running state.
+     */
+    public getRunningTrackCameraCapabilities(): CameraCapabilities {
+        return this.getRenderedCameraOrFail().getCapabilities();
     }
 
     /**
@@ -786,7 +799,6 @@ export class Html5Qrcode {
      *  1. Must be called only if the camera based scanning is in progress.
      *  2. Changing aspectRatio while scanner is running is not yet supported.
      *
-     * @beta This is an experimental API
      * @param {MediaTrackConstraints} specifies a variety of video or camera
      *  controls as defined in
      *  https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackConstraints
@@ -795,7 +807,7 @@ export class Html5Qrcode {
      * @throws error if the scanning is not in running state.
      */
     public applyVideoConstraints(videoConstaints: MediaTrackConstraints)
-        : Promise<any> {
+        : Promise<void> {
         if (!videoConstaints) {
             throw "videoConstaints is required argument.";
         } else if (!VideoConstraintsUtil.isMediaStreamConstraintsValid(
@@ -803,97 +815,18 @@ export class Html5Qrcode {
             throw "invalid videoConstaints passed, check logs for more details";
         }
 
-        if (this.localMediaStream === null) {
+        return this.getRenderedCameraOrFail().applyVideoConstraints(
+            videoConstaints);
+    }
+
+    //#region Private methods.
+    private getRenderedCameraOrFail() {
+        if (this.renderedCamera == null) {
             throw "Scanning is not in running state, call this API only when"
                 + " QR code scanning using camera is in running state.";
         }
-
-        if (this.localMediaStream.getVideoTracks().length === 0) {
-            throw "No video tracks found";
-        }
-
-        return new Promise((resolve, reject) => {
-            if ("aspectRatio" in videoConstaints) {
-                reject("Chaning 'aspectRatio' in run-time is not yet "
-                    + "supported.");
-                return;
-            }
-            const videoTrack = this.localMediaStream!.getVideoTracks()[0];
-            // TODO(mebjas): This can be simplified to just return the promise
-            // directly.
-            videoTrack.applyConstraints(videoConstaints)
-                .then((_) => {
-                    resolve(_);
-                })
-                .catch((error) => {
-                    reject(error);
-                });
-        });
+        return this.renderedCamera!;
     }
-    
-    //#region Private methods for getting cameras.
-    private static getCamerasFromMediaDevices(): Promise<Array<CameraDevice>> {
-        return new Promise((resolve, reject) => {
-            navigator.mediaDevices.getUserMedia(
-                { audio: false, video: true })
-                .then((stream) => {
-                    // hacky approach to close any active stream if they are
-                    // active.
-                    const closeActiveStreams = (stream: MediaStream) => {
-                        const tracks = stream.getVideoTracks();
-                        for (const track of tracks) {
-                            track.enabled = false;
-                            track.stop();
-                            stream.removeTrack(track);
-                        }
-                    }
-
-                    navigator.mediaDevices.enumerateDevices()
-                        .then((devices) => {
-                            const results = [];
-                            for (const device of devices) {
-                                if (device.kind === "videoinput") {
-                                    results.push({
-                                        id: device.deviceId,
-                                        label: device.label
-                                    });
-                                }
-                            }
-                            closeActiveStreams(stream);
-                            resolve(results);
-                        })
-                        .catch((err) => {
-                            reject(`${err.name} : ${err.message}`);
-                        });
-                })
-                .catch((err) => {
-                    reject(`${err.name} : ${err.message}`);
-                });
-        });
-    }
-
-    private static getCamerasFromMediaStreamTrack(): Promise<Array<CameraDevice>> {
-        return new Promise((resolve, _) => {
-            const callback = (sourceInfos: Array<any>) => {
-                const results = [];
-                for (const sourceInfo of sourceInfos) {
-                    if (sourceInfo.kind === "video") {
-                        results.push({
-                            id: sourceInfo.id,
-                            label: sourceInfo.label
-                        });
-                    }
-                }
-                resolve(results);
-            }
-
-            var mst = <any>MediaStreamTrack;
-            mst.getSources(callback);
-        });
-    }
-    //#endregion
-
-    //#region Private methods.
 
     /**
      * Construct list of supported formats and returns based on input args.
@@ -967,14 +900,46 @@ export class Html5Qrcode {
     }
 
     /**
+     * Returns {@code true} if {@code useBarCodeDetectorIfSupported} is
+     * enabled in the config.
+     */
+    /*eslint complexity: ["error", 10]*/
+    private getUseBarCodeDetectorIfSupported(
+        config: Html5QrcodeConfigs | undefined) : boolean {
+        // Default value is true.
+        if (isNullOrUndefined(config)) {
+            return true;
+        }
+
+        if (!isNullOrUndefined(config!.useBarCodeDetectorIfSupported)) {
+            // Default value is false.
+            return config!.useBarCodeDetectorIfSupported !== false;
+        }
+
+        if (isNullOrUndefined(config!.experimentalFeatures)) {
+            return true;
+        }
+
+        let experimentalFeatures = config!.experimentalFeatures!;
+        if (isNullOrUndefined(
+            experimentalFeatures.useBarCodeDetectorIfSupported)) {
+            return true;
+        }
+
+        return experimentalFeatures.useBarCodeDetectorIfSupported !== false;
+    }
+
+    /**
      * Validates if the passed config for qrbox is correct.
      */
     private validateQrboxSize(
-        internalConfig: InternalHtml5QrcodeConfig,
-        rootElementWidth: number) {
+        viewfinderWidth: number,
+        viewfinderHeight: number,
+        internalConfig: InternalHtml5QrcodeConfig) {
         const qrboxSize = internalConfig.qrbox!;
         this.validateQrboxConfig(qrboxSize);
-        let qrDimensions = this.toQrdimensions(qrboxSize);
+        let qrDimensions = this.toQrdimensions(
+            viewfinderWidth, viewfinderHeight, qrboxSize);
 
         const validateMinSize = (size: number) => {
             if (size < Constants.MIN_QR_BOX_SIZE) {
@@ -992,11 +957,11 @@ export class Html5Qrcode {
          * @param configWidth the width of qrbox set by users in the config.
          */
         const correctWidthBasedOnRootElementSize = (configWidth: number) => {
-            if (configWidth > rootElementWidth) {
+            if (configWidth > viewfinderWidth) {
                 this.logger.warn("`qrbox.width` or `qrbox` is larger than the"
                     + " width of the root element. The width will be truncated"
                     + " to the width of root element.");
-                configWidth = rootElementWidth;
+                configWidth = viewfinderWidth;
             }
             return configWidth;
         };
@@ -1016,8 +981,13 @@ export class Html5Qrcode {
      * 
      * It's expected to be either a number or of type {@interface QrDimensions}.
      */
-    private validateQrboxConfig(qrboxSize: number | QrDimensions) {
+    private validateQrboxConfig(
+        qrboxSize: number | QrDimensions | QrDimensionFunction) {
         if (typeof qrboxSize === "number") {
+            return;
+        }
+
+        if (typeof qrboxSize === "function") {
             // This is a valid format.
             return;
         }
@@ -1033,9 +1003,20 @@ export class Html5Qrcode {
      * Possibly converts {@param qrboxSize} to an object of type
      * {@interface QrDimensions}.
      */
-    private toQrdimensions(qrboxSize: number | QrDimensions): QrDimensions {
+    private toQrdimensions(
+        viewfinderWidth: number,
+        viewfinderHeight: number,
+        qrboxSize: number | QrDimensions | QrDimensionFunction): QrDimensions {
         if (typeof qrboxSize === "number") {
             return { width: qrboxSize, height: qrboxSize};
+        } else if (typeof qrboxSize === "function") {
+            try {
+                return qrboxSize(viewfinderWidth, viewfinderHeight);
+            } catch (error) {
+                throw new Error(
+                    "qrbox config was passed as a function but it failed with "
+                    + "unknown error" + error);
+            }
         }
         return qrboxSize;
     }
@@ -1044,22 +1025,27 @@ export class Html5Qrcode {
     /**
     * Setups the UI elements, changes the state of this class.
     *
-    * @param width derived width of viewfinder.
-    * @param height derived height of viewfinder.
+    * @param viewfinderWidth derived width of viewfinder.
+    * @param viewfinderHeight derived height of viewfinder.
     */
     private setupUi(
-        width: number,
-        height: number,
+        viewfinderWidth: number,
+        viewfinderHeight: number,
         internalConfig: InternalHtml5QrcodeConfig): void {
+        // Validate before insertion
+        if (internalConfig.isShadedBoxEnabled()) {
+            this.validateQrboxSize(
+                viewfinderWidth, viewfinderHeight, internalConfig);
+        }
 
         // If `qrbox` size is not set, it will default to the dimensions of the
         // viewfinder.
         const qrboxSize = isNullOrUndefined(internalConfig.qrbox) ? 
-            {width: width, height: height}: internalConfig.qrbox!;
+            {width: viewfinderWidth, height: viewfinderHeight}: internalConfig.qrbox!;
 
         this.validateQrboxConfig(qrboxSize);
-        let qrDimensions = this.toQrdimensions(qrboxSize);
-        if (qrDimensions.height > height) {
+        let qrDimensions = this.toQrdimensions(viewfinderWidth, viewfinderHeight, qrboxSize);
+        if (qrDimensions.height > viewfinderHeight) {
             this.logger.warn("[Html5Qrcode] config.qrbox has height that is"
                 + "greater than the height of the video stream. Shading will be"
                 + " ignored");
@@ -1067,30 +1053,36 @@ export class Html5Qrcode {
  
         const shouldShadingBeApplied
             = internalConfig.isShadedBoxEnabled()
-                && qrDimensions.height <= height;
+                && qrDimensions.height <= viewfinderHeight;
         const defaultQrRegion: QrcodeRegionBounds = {
             x: 0,
             y: 0,
-            width: width,
-            height: height
+            width: viewfinderWidth,
+            height: viewfinderHeight
         };
 
         const qrRegion = shouldShadingBeApplied
-            ? this.getShadedRegionBounds(width, height, qrDimensions)
+            ? this.getShadedRegionBounds(viewfinderWidth, viewfinderHeight, qrDimensions)
             : defaultQrRegion;
  
         const canvasElement = this.createCanvasElement(
             qrRegion.width, qrRegion.height);
+        // Tell user agent that this canvas will be read frequently.
+        // More info:
+        // https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently
+        const contextAttributes: any = { willReadFrequently: true };
+        // Casting canvas to any, as Microsoft's interface definition hasn't
+        // caught up with latest definition for 'CanvasRenderingContext2DSettings'.
         const context: CanvasRenderingContext2D
-             = canvasElement.getContext("2d")!;
+            = (<any>canvasElement).getContext("2d", contextAttributes)!;
         context.canvas.width = qrRegion.width;
         context.canvas.height = qrRegion.height;
- 
+
         // Insert the canvas
         this.element!.append(canvasElement);
         if (shouldShadingBeApplied) {
             this.possiblyInsertShadingElement(
-                this.element!, width, height, qrDimensions);
+                this.element!, viewfinderWidth, viewfinderHeight, qrDimensions);
         }
 
         this.createScannerPausedUiElement(this.element!);
@@ -1104,12 +1096,13 @@ export class Html5Qrcode {
     // TODO(mebjas): Convert this to a standard message viewer.
     private createScannerPausedUiElement(rootElement: HTMLElement) {
         const scannerPausedUiElement = document.createElement("div");
-        scannerPausedUiElement.innerText = "Scanner paused";
+        scannerPausedUiElement.innerText = Html5QrcodeStrings.scannerPaused();
         scannerPausedUiElement.style.display = "none";
         scannerPausedUiElement.style.position = "absolute";
         scannerPausedUiElement.style.top = "0px";
         scannerPausedUiElement.style.zIndex = "1";
-        scannerPausedUiElement.style.background = "yellow";
+        scannerPausedUiElement.style.background = "rgba(9, 9, 9, 0.46)";
+        scannerPausedUiElement.style.color = "#FFECEC";
         scannerPausedUiElement.style.textAlign = "center";
         scannerPausedUiElement.style.width = "100%";
         rootElement.appendChild(scannerPausedUiElement);
@@ -1161,12 +1154,12 @@ export class Html5Qrcode {
             return;
         }
 
-        if (!this.localMediaStream) {
+        if (!this.renderedCamera) {
             return;
         }
         // There is difference in size of rendered video and one that is
         // considered by the canvas. Need to account for scaling factor.
-        const videoElement = this.videoElement!;
+        const videoElement = this.renderedCamera!.getSurface();
         const widthRatio
             = videoElement.videoWidth / videoElement.clientWidth;
         const heightRatio
@@ -1221,68 +1214,7 @@ export class Html5Qrcode {
                 this.logger.logError(
                     "Error happend while scanning context", error);
                 triggerNextScan();
-            });        
-    }
-
-    /**
-     * Success callback when user media (Camera) is attached.
-     */
-    private onMediaStreamReceived(
-        mediaStream: MediaStream,
-        internalConfig: InternalHtml5QrcodeConfig,
-        areVideoConstraintsEnabled: boolean,
-        clientWidth: number,
-        qrCodeSuccessCallback: QrcodeSuccessCallback,
-        qrCodeErrorCallback: QrcodeErrorCallback): Promise<null> {
-        const $this = this;
-        return new Promise((resolve, reject) => {
-            const setupVideo = () => {
-                const videoElement = this.createVideoElement(clientWidth);
-                $this.element!.append(videoElement);
-                // Attach listeners to video.
-                videoElement.onabort = reject;
-                videoElement.onerror = reject;
-
-                const onVideoStart = () => {
-                    const videoWidth = videoElement.clientWidth;
-                    const videoHeight = videoElement.clientHeight;
-                    $this.setupUi(videoWidth, videoHeight, internalConfig);
-                    // start scanning after video feed has started
-                    $this.foreverScan(
-                        internalConfig,
-                        qrCodeSuccessCallback,
-                        qrCodeErrorCallback);
-                    videoElement.removeEventListener("playing", onVideoStart);
-                    resolve(/* void */ null);
-                }
-                videoElement.addEventListener("playing", onVideoStart);
-                videoElement.srcObject = mediaStream;
-                videoElement.play();
-
-                // Set state
-                $this.videoElement = videoElement;
-            }
-
-            $this.localMediaStream = mediaStream;
-            // If videoConstraints is passed, ignore all other configs.
-            if (areVideoConstraintsEnabled || !internalConfig.aspectRatio) {
-                setupVideo();
-            } else {
-                const constraints = {
-                    aspectRatio : internalConfig.aspectRatio
-                }
-                const track = mediaStream.getVideoTracks()[0];
-                track.applyConstraints(constraints)
-                    .then((_) => setupVideo())
-                    .catch((error) => {
-                        $this.logger.logErrors(
-                            ["[Html5Qrcode] Constriants could not "
-                                + "be satisfied, ignoring constraints",
-                            error]);
-                        setupVideo();
-                    });
-            }
-        });
+            });
     }
 
     private createVideoConstraints(
@@ -1434,15 +1366,6 @@ export class Html5Qrcode {
         }
     }
 
-    private createVideoElement(width: number): HTMLVideoElement {
-        const videoElement = document.createElement("video");
-        videoElement.style.width = `${width}px`;
-        videoElement.muted = true;
-        videoElement.setAttribute("muted", "true");
-        (<any>videoElement).playsInline = true;
-        return videoElement;
-    }
-
     private possiblyUpdateShaders(qrMatch: boolean) {
         if (this.qrMatch === qrMatch) {
             return;
@@ -1511,13 +1434,13 @@ export class Html5Qrcode {
         const topBottomBorderSize = (height - qrboxSize.height) / 2;
 
         shadingElement.style.borderLeft
-            = `${rightLeftBorderSize}px solid #0000007a`;
+            = `${rightLeftBorderSize}px solid rgba(0, 0, 0, 0.48)`;
         shadingElement.style.borderRight
-            = `${rightLeftBorderSize}px solid #0000007a`;
+            = `${rightLeftBorderSize}px solid rgba(0, 0, 0, 0.48)`;
         shadingElement.style.borderTop
-            = `${topBottomBorderSize}px solid #0000007a`;
+            = `${topBottomBorderSize}px solid rgba(0, 0, 0, 0.48)`;
         shadingElement.style.borderBottom
-            = `${topBottomBorderSize}px solid #0000007a`;
+            = `${topBottomBorderSize}px solid rgba(0, 0, 0, 0.48)`;
         shadingElement.style.boxSizing = "border-box";
         shadingElement.style.top = "0px";
         shadingElement.style.bottom = "0px";
@@ -1538,6 +1461,7 @@ export class Html5Qrcode {
                 /* width= */ largeSize, 
                 /* height= */ smallSize,
                 /* top= */ -smallSize,
+                /* bottom= */ null,
                 /* side= */ 0,
                 /* isLeft= */ true);
             this.insertShaderBorders(
@@ -1545,20 +1469,23 @@ export class Html5Qrcode {
                 /* width= */ largeSize,
                 /* height= */ smallSize,
                 /* top= */ -smallSize,
+                /* bottom= */ null,
                 /* side= */ 0,
                 /* isLeft= */ false);
             this.insertShaderBorders(
                 shadingElement,
                 /* width= */ largeSize,
                 /* height= */ smallSize,
-                /* top= */ qrboxSize.height + smallSize,
+                /* top= */ null,
+                /* bottom= */ -smallSize,
                 /* side= */ 0,
                 /* isLeft= */ true);
             this.insertShaderBorders(
                 shadingElement,
                 /* width= */ largeSize,
                 /* height= */ smallSize,
-                /* top= */ qrboxSize.height + smallSize,
+                /* top= */ null,
+                /* bottom= */ -smallSize,
                 /* side= */ 0,
                 /* isLeft= */ false);
             this.insertShaderBorders(
@@ -1566,13 +1493,15 @@ export class Html5Qrcode {
                 /* width= */ smallSize,
                 /* height= */ largeSize + smallSize,
                 /* top= */ -smallSize,
+                /* bottom= */ null,
                 /* side= */ -smallSize,
                 /* isLeft= */ true);
             this.insertShaderBorders(
                 shadingElement,
                 /* width= */ smallSize,
                 /* height= */ largeSize + smallSize,
-                /* top= */ qrboxSize.height + smallSize - largeSize,
+                /* top= */ null,
+                /* bottom= */ -smallSize,
                 /* side= */ -smallSize,
                 /* isLeft= */ true);
             this.insertShaderBorders(
@@ -1580,13 +1509,15 @@ export class Html5Qrcode {
                 /* width= */ smallSize,
                 /* height= */ largeSize + smallSize,
                 /* top= */ -smallSize,
+                /* bottom= */ null,
                 /* side= */ -smallSize,
                 /* isLeft= */ false);
             this.insertShaderBorders(
                 shadingElement,
                 /* width= */ smallSize,
                 /* height= */ largeSize + smallSize,
-                /* top= */ qrboxSize.height + smallSize - largeSize,
+                /* top= */ null,
+                /* bottom= */ -smallSize,
                 /* side= */ -smallSize,
                 /* isLeft= */ false);
             this.hasBorderShaders = true;
@@ -1598,7 +1529,8 @@ export class Html5Qrcode {
         shaderElem: HTMLDivElement,
         width: number,
         height: number,
-        top: number,
+        top: number | null,
+        bottom: number | null,
         side: number,
         isLeft: boolean) {
         const elem = document.createElement("div");
@@ -1606,7 +1538,12 @@ export class Html5Qrcode {
         elem.style.backgroundColor = Constants.BORDER_SHADER_DEFAULT_COLOR;
         elem.style.width = `${width}px`;
         elem.style.height = `${height}px`;
-        elem.style.top = `${top}px`;
+        if (top !== null) {
+            elem.style.top = `${top}px`;
+        }
+        if (bottom !== null) {
+            elem.style.bottom = `${bottom}px`;
+        }
         if (isLeft) {
           elem.style.left = `${side}px`;
         } else {

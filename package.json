@@ -1,6 +1,6 @@
 {
   "name": "html5-qrcode",
-  "version": "2.1.5",
+  "version": "2.3.7",
   "description": "A cross platform HTML5 QR Code & bar code scanner",
   "main": "./cjs/index.js",
   "module": "./esm/index.js",
@@ -8,13 +8,12 @@
   "esnext": "./es2015/index.js",
   "unpkg": "./html5-qrcode.min.js",
   "scripts": {
-    "build-windows": "scripts\\build-windows.sh",
-    "test": "npm run-script test:build && npm run-script test:run && npm run-script test:clean",
-    "test_windows": "npm run-script test:build && npm run-script test:run && npm run-script test:clean_windows",
+    "build-windows": "npm run build:es2015 && npm run build:esm && npm run build:esnext && npm run build:cjs && npm run build:umd_windows && npm run build:typing && npm run build:copy_windows",
+    "test": "npm run-script test:build && npm run-script test:run",
+    "test_windows": "npm run-script test:build && npm run-script test:run_windows",
     "test:build": "tsc --build tsconfig.test.json",
-    "test:clean": "rm -Rf ./output",
-    "test:clean_windows": "rmdir /s /q .\\output",
-    "test:run": "mocha -r tsconfig-paths/register --timeout 200000 output/tests/**/*.test.js",
+    "test:run_windows": ".\\scripts\\test-run.bat",
+    "test:run": "./scripts/test-run.sh",
     "lint-md": "remark .",
     "clean": "rm -Rf ./lib/* ./build/* ./meta/bundlesize/* ./meta/coverage/* ./.rpt2_cache  ./dist/* ./src/*.d.ts",
     "prebuild": "npm run clean",
@@ -28,7 +27,9 @@
     "build:umd": "./scripts/build-webpack.sh",
     "build:umd_windows": ".\\scripts\\build-webpack.bat",
     "build:copy": "cp README.md dist && cp package.json dist && cp LICENSE dist",
-    "release": "npm run build && cd dist && npm publish"
+    "build:copy_windows": "copy README.md dist && copy package.json dist && copy LICENSE dist",
+    "release": "npm run build && cp dist/html5-qrcode.min.js minified/html5-qrcode.min.js && cd dist && npm publish",
+    "release_windows": "npm run build && cp dist\\html5-qrcode.min.js minified\\html5-qrcode.min.js && cd dist && npm publish"
   },
   "repository": {
     "type": "git",
@@ -60,6 +61,8 @@
     "babel-minify": "^0.5.1",
     "chai": "^4.3.4",
     "expose-loader": "^2.0.0",
+    "jsdom": "20.0.2",
+    "jsdom-global": "3.0.2",
     "mocha": "^9.1.3",
     "mocha-lcov-reporter": "^1.3.0",
     "promise-polyfill": "^8.1.3",

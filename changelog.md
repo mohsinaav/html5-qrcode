@@ -1,3 +1,340 @@
+### Version 2.3.8
+ - `Scanner Paused` color tone changes.
+ - Misc code refactor.
+
+### Version 2.3.7
+-   Fix QR code scanning error.
+
+### Version 2.3.6
+-   Fix to minified js, some UI fixes to improve accessibility & SEO.
+
+### Version 2.3.5
+
+Multiple bug fixes
+-   Missing `resolve()` in `Html5QrcodeScanner` fixed in [PR#168](https://github.com/mebjas/html5-qrcode/pull/684) by [itsUndefined](https://github.com/itsUndefined).
+-   Fixed uncaught type error issue in [PR#671](https://github.com/mebjas/html5-qrcode/pull/671) by [zolfariot](https://github.com/zolfariot).
+-   Add sync issue in `RenderedCameraImpl` in [PR#648](https://github.com/mebjas/html5-qrcode/pull/648) by [pholawat-tle](https://github.com/pholawat-tle).
+
+
+### Version 2.3.4
+-    `useBarCodeDetectorIfSupported` defaults to `true` and if supported the library will internally alternate between `BarcodeDetector` and `zxing-js`. Same robustness added for file based scan as well if more than one decoder is supported.
+-    Fixed the UI issue - [Issue#613](https://github.com/mebjas/html5-qrcode/issues/613).
+-    Fix for torch issue - [Issue#634](https://github.com/mebjas/html5-qrcode/issues/634).
+-    In case of `scanFile(..)` APIs, scan at image resolution. Show `Loading image...` while the image is being loaded for rendering. More info at [Issue#612](https://github.com/mebjas/html5-qrcode/issues/612)
+
+### Version 2.3.3
+Quick fix for - [issue#621](https://github.com/mebjas/html5-qrcode/issues/621). With this zoom & torch is not supported in firefox for now.
+
+### Version 2.3.2
+
+#### Features or bug fixes.
+-   Hide margin of parent container when camera selection UI is hidden (if only 1 camera is found.) - [Issue#599](https://github.com/mebjas/html5-qrcode/issues/599), [PR#607](https://github.com/mebjas/html5-qrcode/pull/607) by [adamwolf@](https://github.com/adamwolf).
+
+**Support for zoom slider in `Html5QrcodeScanner`.**
+Added basic support for zoom feature under configuration flag (not enabled by default). This was raised in issue [issue#330](https://github.com/mebjas/html5-qrcode/issues/330).This should help address some focus issues raised so far.
+
+Not supported on Safari or any IOS browser though!
+
+How to use
+
+```js
+let html5QrcodeScanner = new Html5QrcodeScanner(
+    "reader", 
+    { 
+        fps: 10,
+        qrbox: qrboxFunction,
+        useBarCodeDetectorIfSupported: true,
+        rememberLastUsedCamera: true,
+        aspectRatio: 4/3,
+        showTorchButtonIfSupported: true,
+        showZoomSliderIfSupported: true,
+        defaultZoomValueIfSupported: 2
+        // ^ this means by default camera will load at 2x zoom.
+    });
+```
+
+#### Tech debts
+-    Refactored the camera components out of `src/html5-qrcode.ts`
+
+### Version 2.3.1
+-   Improved support for UPC types - by [Breno1288](https://github.com/Breno1288), forked from PR - [pull#501](https://github.com/mebjas/html5-qrcode/pull/501)
+-   Fix form submission in Firefox issue - [Discussion#413](https://github.com/mebjas/html5-qrcode/discussions/413#discussioncomment-2124480) by [Joggel72](https://github.com/Joggel72), forked from PR - [pull#431](https://github.com/mebjas/html5-qrcode/pull/431)
+-   Fix support for UPC-E as called out in several bugs - [parent issue#605](https://github.com/mebjas/html5-qrcode/issues/605)
+-   Add `willReadFrequently` attribute to canvas context for camera scan as per Google Chrome recommendation.
+
+### Version 2.3.0
+
+-    Added support for drag and drop of image in file based scanner.
+-    Info UI updated.
+
+### Version 2.2.8
+
+#### Custom camera labels when not available.
+In certain browsers as well as cases like Android Webview it looks like camera
+name is not returned by the browser. In such cases the camera selection has
+empty named options.
+
+To make the UX better, the library will give custom names to the cameras.
+
+-   Github Issue: [Issue#578](https://github.com/mebjas/html5-qrcode/issues/578)
+
+For example in Duck Duck Go browser which has this behavior, it will look like
+this
+
+| Before selection | After selection |
+| --- | --- |
+| ![Screenshot_20221105-005544](https://user-images.githubusercontent.com/3007365/200032567-eb50b4f0-e25f-4bdb-a233-fcbb906122aa.png) | ![Screenshot_20221105-005550](https://user-images.githubusercontent.com/3007365/200032557-21679229-3d21-4212-a22f-1f2558b6f6b6.png) |
+
+
+### Version 2.2.7
+
+#### Add support for custom CSS
+Developer / User Story: As a developer I can write custom CSS for `Html5QrcodeScanner`.
+
+Feature request: [Issue#389](https://github.com/mebjas/html5-qrcode/issues/389)
+
+List of CSS class and IDs added.
+
+1. All key elements will have a common CSS class `html5-qrcode-element`. This way developers can customise element by element. For example:
+
+```css
+button.html5-qrcode-element {
+    color: 'red';
+    border: '1px solid red';
+}
+```
+
+Key elements are:
+-    Request camera permission button.
+-    "Scan and image file" vs "Scan using camera directly" link.
+-    "File selection" input ('file')
+-    Start or Stop camera button.
+-    Camera selection Select element
+-    Torch button
+
+2. key elements will have specific IDs defined in `src/ui/scanner/base.ts`. This can be used to customise per elements.
+
+
+##### TODOs
+-   [ ] Document in a blog post
+-   [ ] Add pointer in qrcode.minhazav.dev
+-   [ ] Add pointer in Readme
+
+#### Change file selection UI from `input` to `button`
+Modified the UI a little to hide the file selection as input and replace with
+custom button and javascript based solution.
+
+One motivation here is this will allow more uniform style for the widget.
+
+#### Graduate `useBarCodeDetectorIfSupported` to `Html5QrcodeConfigs`.
+`useBarCodeDetectorIfSupported` was tested as an experimental configuration for
+a long time and has proven to be very efficient and well supported. It has been
+tested in [ScanApp](https://scanapp.org) for quiet some time.
+
+Considering this experimental API is not well documented, it makes it hard for
+folks to discover it. By graduating this configuration to `Html5QrcodeConfigs` I
+hope to make it more discoverable.
+
+In this version the `ExperimentalFeaturesConfig#useBarCodeDetectorIfSupported`
+has been marked deprecated but not removed due to backwards compatibility
+reasons. Users can set either of them but `Html5QrcodeConfigs` one will take
+precedence if set.
+
+Once further support is added to browsers, this can be set as true by default.
+
+### Version 2.2.5 & Version 2.2.6
+
+> Small minification fix in Version 2.2.6.
+
+#### Added support for turning `torch` On and Off in `Html5QrcodeScanner`.
+On supported devices + browsers.
+
+This new feature will implement the feature request - [Issue#129](https://github.com/mebjas/html5-qrcode/issues/129) and add support for torch (also called flash) on supported devices and browsers.
+
+So far I have confirmed functionality on Samsung Flip 4 Chrome and Internet (Samsung's default browser).
+
+This is only supported on `Html5QrcodeScanner` and can be enabled using the config like this.
+
+```ts
+let html5QrcodeScanner = new Html5QrcodeScanner(
+    "reader", 
+    { 
+        fps: 10,
+        qrbox: qrboxFunction,
+        // Important notice: this is experimental feature, use it at your
+        // own risk. See documentation in
+        // mebjas@/html5-qrcode/src/experimental-features.ts
+        experimentalFeatures: {
+            useBarCodeDetectorIfSupported: true
+        },
+        rememberLastUsedCamera: true,
+        aspectRatio: 1.7777778,
+        showTorchButtonIfSupported: true
+    });
+```
+
+The `showTorchButtonIfSupported: true` part is the crucial one. It's off by default for now as I don't like the UI very much.
+
+#### Added support for `getRunningTrackSettings()`.
+
+Added a new API to get settings (type: [MediaTrackSettings](https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackSettings)) for running video streams while QR code is being scanned.
+
+```ts
+/**
+ * Returns the object containing the current values of each constrainable
+ * property of the running video track.
+ * 
+ * Read more: https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack/getSettings
+ * 
+ * Important:
+ *  1. Must be called only if the camera based scanning is in progress.
+ *
+ * @returns the supported settings of the running video track.
+ * @throws error if the scanning is not in running state.
+ */
+public getRunningTrackSettings(): MediaTrackSettings {}
+```
+
+This API can be used to check the currently applied settings on the running video stream like weather torch is on or not.
+
+#### `getRunningTrackCapabilities(..)` and `applyVideoConstraints(..)` out of beta.
+
+Both `Html5Qrcode` and `Html5QrcodeScanner` classes had support for following APIs.
+
+```ts
+/**
+ * Returns the capabilities of the running video track.
+ * 
+ * Read more: https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack/getConstraints
+ * 
+ * Important:
+ *  1. Must be called only if the camera based scanning is in progress.
+ *
+ * @returns the capabilities of a running video track.
+ * @throws error if the scanning is not in running state.
+ */
+public getRunningTrackCapabilities(): MediaTrackCapabilities {}
+
+/**
+ * Apply a video constraints on running video track from camera.
+ *
+ * Important:
+ *  1. Must be called only if the camera based scanning is in progress.
+ *  2. Changing aspectRatio while scanner is running is not yet supported.
+ *
+ * @param {MediaTrackConstraints} specifies a variety of video or camera
+ *  controls as defined in
+ *  https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackConstraints
+ * @returns a Promise which succeeds if the passed constraints are applied,
+ *  fails otherwise.
+ * @throws error if the scanning is not in running state.
+ */
+public applyVideoConstraints(videoConstaints: MediaTrackConstraints)
+    : Promise<any> {}
+```
+
+These have now been taken out of beta and publicly documented. More blog articles to be published for these.
+
+#### Sponsorship
+
+Thanks <a href="https://github.com/bujjivadu"><img src="https://github.com/bujjivadu.png" width="40px" alt="" /></a> for sponsorship!
+
+### Version 2.2.4
+ - Improved support for Huawei browser with [PR#563](https://github.com/mebjas/html5-qrcode/pull/563), Contribution by [jackhe16](https://github.com/jackhe16).
+ - Fixed QR Border Placement with [PR#555](https://github.com/mebjas/html5-qrcode/pull/555), Contribution by [allanbrault](https://github.com/allanbrault).
+ - Fixed config issue ([Issue#494](https://github.com/mebjas/html5-qrcode/issues/494)) with [PR#521](https://github.com/mebjas/html5-qrcode/pull/521), Contribution by [rlueder](https://github.com/rlueder).
+
+### Version 2.2.1
+ - Added support for `supportedScanType` in `Html5QrcodeScanner`. This feature
+    was implemented by our latest contributor - [mohsinaav@](https://github.com/mohsinaav)
+  
+   Now users can decide to only use camera based scan or file based scan or use
+   them in different order. How to use:
+
+
+   ```js
+    function onScanSuccess(decodedText, decodedResult) {
+        // handle the scanned code as you like, for example:
+        console.log(`Code matched = ${decodedText}`, decodedResult);
+    }
+
+    let config = {
+        fps: 10,
+        qrbox: {width: 100, height: 100},
+        rememberLastUsedCamera: true,
+        // Only support camera scan type.
+        supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA]
+    };
+
+    let html5QrcodeScanner = new Html5QrcodeScanner(
+        "reader", config, /* verbose= */ false);
+    html5QrcodeScanner.render(onScanSuccess);
+   ```
+
+   For file based scan only choose:
+   ```js
+   supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_FILE]
+   ```
+
+   For supporting both as it is today, you can ignore this field or set as:
+   ```js
+   supportedScanTypes: [
+       Html5QrcodeScanType.SCAN_TYPE_CAMERA,
+        Html5QrcodeScanType.SCAN_TYPE_FILE]
+   ```
+
+   To set the file based scan as defult change the order:
+   ```js
+      supportedScanTypes: [
+        Html5QrcodeScanType.SCAN_TYPE_FILE,
+        Html5QrcodeScanType.SCAN_TYPE_CAMERA]
+   ```
+
+### Version 2.2.0
+-   `config.qrbox` now supports consuming function of type
+
+    ```ts
+    /**
+     * A function that takes in the width and height of the video stream 
+    * and returns QrDimensions.
+    * 
+    * Viewfinder refers to the video showing camera stream.
+    */
+    export type QrDimensionFunction =
+        (viewfinderWidth: number, viewfinderHeight: number) => QrDimensions;
+    ```
+
+    This will allow developers to define custom QR box dimensions for their
+    implementations.
+
+    Example:
+    ```js
+    function onScanSuccess(decodedText, decodedResult) {
+        // handle the scanned code as you like, for example:
+        console.log(`Code matched = ${decodedText}`, decodedResult);
+    }
+
+    // Square QR box with edge size = 70% of the smaller edge of the viewfinder.
+    let qrboxFunction = function(viewfinderWidth, viewfinderHeight) {
+        let minEdgePercentage = 0.7; // 70%
+        let minEdgeSize = Math.min(viewfinderWidth, viewfinderHeight);
+        let qrboxSize = Math.floor(minEdgeSize * minEdgePercentage);
+        return {
+            width: qrboxSize,
+            height: qrboxSize
+        };
+    }
+
+    let html5QrcodeScanner = new Html5QrcodeScanner(
+        "reader",
+        { fps: 10, qrbox: qrboxFunction },
+        /* verbose= */ false);
+    html5QrcodeScanner.render(onScanSuccess);
+    ```
+
+### Version 2.1.6
+-   Add `alt` information to info icon to improve accessibility.
+
 ### Version 2.1.5
 
 -   Changed behavior from throwing error in case `qrbox.width` or `qrbox` is larger than the width of the root element. In such cases the dimension will automatically be truncated to the size of root element and will throw a warning based on verbosity settings. This should address [issue#357](https://github.com/mebjas/html5-qrcode/issues/357)

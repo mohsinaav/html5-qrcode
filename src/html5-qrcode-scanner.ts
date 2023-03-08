@@ -16,11 +16,15 @@ import {
     Html5QrcodeResult,
     Html5QrcodeError,
     Html5QrcodeErrorFactory,
-    CameraDevice,
     BaseLoggger,
     Logger,
     isNullOrUndefined,
+    clip,
 } from "./core";
+
+import { CameraCapabilities } from "./camera/core";
+
+import { CameraDevice } from "./camera/core";
 
 import {
     Html5Qrcode,
@@ -47,9 +51,27 @@ import {
 } from "./ui";
 
 import {
-  CameraManager
-} from "./camera";
+  CameraPermissions
+} from "./camera/permissions";
+
 import { Html5QrcodeScannerState } from "./state-manager";
+
+import { ScanTypeSelector } from "./ui/scanner/scan-type-selector";
+
+import { TorchButton } from "./ui/scanner/torch-button";
+
+import {
+    FileSelectionUi,
+    OnFileSelected
+} from "./ui/scanner/file-selection-ui";
+
+import {
+    BaseUiElementFactory,
+    PublicUiElementIdAndClasses
+} from "./ui/scanner/base";
+
+import { CameraSelectionUi } from "./ui/scanner/camera-selection-ui";
+import { CameraZoomUi } from "./ui/scanner/camera-zoom-ui";
 
 /**
  * Different states of QR Code Scanner.
@@ -73,9 +95,53 @@ interface Html5QrcodeScannerConfig
      * is already granted for "camera", QR code scanning will automatically
      * start for previously used camera.
      * 
-     * Note: default value is true.
+     * Note: default value is {@code true}.
      */
     rememberLastUsedCamera?: boolean | undefined;
+
+    /**
+     * Sets the desired scan types to be supported in the scanner.
+     * 
+     *  - Not setting a value will follow the default order supported by
+     *      library.
+     *  - First value would be used as the default value. Example:
+     *    - [SCAN_TYPE_CAMERA, SCAN_TYPE_FILE]: Camera will be default type,
+     *      user can switch to file based scan.
+     *    - [SCAN_TYPE_FILE, SCAN_TYPE_CAMERA]: File based scan will be default
+     *      type, user can switch to camera based scan.
+     *  - Setting only value will disable option to switch to other. Example:
+     *    - [SCAN_TYPE_CAMERA] - Only camera based scan supported.
+     *    - [SCAN_TYPE_FILE] - Only file based scan supported.
+     *  - Setting wrong values or multiple values will fail.
+     */
+    supportedScanTypes?: Array<Html5QrcodeScanType> | [];
+
+    /**
+     * If {@code true} the rendered UI will have button to turn flash on or off
+     * based on device + browser support.
+     * 
+     * Note: default value is {@code false}.
+     */
+    showTorchButtonIfSupported?: boolean | undefined;
+
+    /**
+     * If {@code true} the rendered UI will have slider to zoom camera based on
+     * device + browser support.
+     * 
+     * Note: default value is {@code false}.
+     * 
+     * TODO(minhazav): Document this API, currently hidden.
+     */
+    showZoomSliderIfSupported?: boolean | undefined;
+
+    /**
+     * Default zoom value if supported.
+     * 
+     * Note: default value is 1x.
+     * 
+     * TODO(minhazav): Document this API, currently hidden.
+     */
+    defaultZoomValueIfSupported?: number | undefined;
 }
 
 function toHtml5QrcodeCameraScanConfig(config: Html5QrcodeScannerConfig)
@@ -94,11 +160,13 @@ function toHtml5QrcodeFullConfig(
     : Html5QrcodeFullConfig {
     return {
         formatsToSupport: config.formatsToSupport,
+        useBarCodeDetectorIfSupported: config.useBarCodeDetectorIfSupported,
         experimentalFeatures: config.experimentalFeatures,
         verbose: verbose
     };
 }
 
+// End to end scanner library.
 export class Html5QrcodeScanner {
 
     //#region private fields
@@ -108,6 +176,7 @@ export class Html5QrcodeScanner {
     private currentScanType: Html5QrcodeScanType;
     private sectionSwapAllowed: boolean;
     private persistedDataManager: PersistedDataManager;
+    private scanTypeSelector: ScanTypeSelector;
     private logger: Logger;
 
     // Initally null fields.
@@ -117,6 +186,7 @@ export class Html5QrcodeScanner {
     private lastMatchFound: string | null = null;
     private cameraScanImage: HTMLImageElement | null = null;
     private fileScanImage: HTMLImageElement | null = null;
+    private fileSelectionUi: FileSelectionUi | null = null;
     //#endregion
 
     /**
@@ -138,7 +208,10 @@ export class Html5QrcodeScanner {
             throw `HTML Element with id=${elementId} not found`;
         }
 
-        this.currentScanType = Html5QrcodeScanType.SCAN_TYPE_CAMERA;
+        this.scanTypeSelector = new ScanTypeSelector(
+            this.config.supportedScanTypes);
+        this.currentScanType = this.scanTypeSelector.getDefaultScanType();
+
         this.sectionSwapAllowed = true;
         this.logger = new BaseLoggger(this.verbose);
 
@@ -210,15 +283,11 @@ export class Html5QrcodeScanner {
      * @throws error if method is called when scanner is not in scanning state.
      */
     public pause(shouldPauseVideo?: boolean) {
-        if (!this.html5Qrcode) {
-            throw "Code scanner not initialized.";
-        }
-
         if (isNullOrUndefined(shouldPauseVideo) || shouldPauseVideo !== true) {
             shouldPauseVideo = false;
         }
 
-        this.html5Qrcode.pause(shouldPauseVideo);
+        this.getHtml5QrcodeOrFail().pause(shouldPauseVideo);
     }
     
     /**
@@ -236,11 +305,7 @@ export class Html5QrcodeScanner {
      * @throws error if method is called when scanner is not in paused state.
      */
     public resume() {
-        if (!this.html5Qrcode) {
-            throw "Code scanner not initialized.";
-        }
-
-        this.html5Qrcode.resume();
+        this.getHtml5QrcodeOrFail().resume();
     }
 
     /**
@@ -249,11 +314,7 @@ export class Html5QrcodeScanner {
      * @returns state of type {@enum Html5QrcodeScannerState}.
      */
     public getState(): Html5QrcodeScannerState {
-        if (!this.html5Qrcode) {
-            throw "Code scanner not initialized.";
-        }
-
-        return this.html5Qrcode.getState();
+       return this.getHtml5QrcodeOrFail().getState();
     }
 
     /**
@@ -298,6 +359,7 @@ export class Html5QrcodeScanner {
                     // Assuming file based scan was ongoing.
                     this.html5Qrcode.clear();
                     emptyHtmlContainer();
+                    resolve();
                 }
             });
         }
@@ -310,20 +372,34 @@ export class Html5QrcodeScanner {
     /**
      * Returns the capabilities of the running video track.
      * 
+     * Read more: https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack/getConstraints
+     * 
      * Note: Should only be called if {@code Html5QrcodeScanner#getState()}
      *   returns {@code Html5QrcodeScannerState#SCANNING} or 
      *   {@code Html5QrcodeScannerState#PAUSED}.
      *
-     * @beta This is an experimental API
      * @returns the capabilities of a running video track.
      * @throws error if the scanning is not in running state.
      */
     public getRunningTrackCapabilities(): MediaTrackCapabilities {
-        if (!this.html5Qrcode) {
-            throw "Code scanner not initialized.";
-        }
+        return this.getHtml5QrcodeOrFail().getRunningTrackCapabilities();
+    }
 
-        return this.html5Qrcode.getRunningTrackCapabilities();
+    /**
+     * Returns the object containing the current values of each constrainable
+     * property of the running video track.
+     * 
+     * Read more: https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack/getSettings
+     * 
+     * Note: Should only be called if {@code Html5QrcodeScanner#getState()}
+     *   returns {@code Html5QrcodeScannerState#SCANNING} or 
+     *   {@code Html5QrcodeScannerState#PAUSED}.
+     *
+     * @returns the supported settings of the running video track.
+     * @throws error if the scanning is not in running state.
+     */
+    public getRunningTrackSettings(): MediaTrackSettings {
+        return this.getHtml5QrcodeOrFail().getRunningTrackSettings();
     }
 
     /**
@@ -333,7 +409,6 @@ export class Html5QrcodeScanner {
      *   returns {@code Html5QrcodeScannerState#SCANNING} or 
      *   {@code Html5QrcodeScannerState#PAUSED}.
      *
-     * @beta This is an experimental API
      * @param {MediaTrackConstraints} specifies a variety of video or camera
      *  controls as defined in
      *  https://developer.mozilla.org/en-US/docs/Web/API/MediaTrackConstraints
@@ -342,16 +417,19 @@ export class Html5QrcodeScanner {
      * @throws error if the scanning is not in running state.
      */
     public applyVideoConstraints(videoConstaints: MediaTrackConstraints)
-        : Promise<any> {
-        if (!this.html5Qrcode) {
-            throw "Code scanner not initialized.";
-        }
-
-        return this.html5Qrcode.applyVideoConstraints(videoConstaints);
+        : Promise<void> {
+        return this.getHtml5QrcodeOrFail().applyVideoConstraints(videoConstaints);
     }
     //#endregion
 
     //#region Private methods
+    private getHtml5QrcodeOrFail() {
+        if (!this.html5Qrcode) {
+            throw "Code scanner not initialized.";
+        }
+        return this.html5Qrcode!;
+    }
+
     private createConfig(config: Html5QrcodeScannerConfig | undefined)
         : Html5QrcodeScannerConfig {
         if (config) {
@@ -364,13 +442,21 @@ export class Html5QrcodeScanner {
                 config.rememberLastUsedCamera
                     = Html5QrcodeConstants.DEFAULT_REMEMBER_LAST_CAMERA_USED;
             }
+
+            if (!config.supportedScanTypes) {
+                config.supportedScanTypes
+                    = Html5QrcodeConstants.DEFAULT_SUPPORTED_SCAN_TYPE;
+            }
+
             return config;
         }
 
         return {
             fps: Html5QrcodeConstants.SCAN_DEFAULT_FPS,
             rememberLastUsedCamera:
-                Html5QrcodeConstants.DEFAULT_REMEMBER_LAST_CAMERA_USED
+                Html5QrcodeConstants.DEFAULT_REMEMBER_LAST_CAMERA_USED,
+            supportedScanTypes:
+                Html5QrcodeConstants.DEFAULT_SUPPORTED_SCAN_TYPE
         };
     }
 
@@ -387,7 +473,11 @@ export class Html5QrcodeScanner {
         qrCodeScanRegion.style.minHeight = "100px";
         qrCodeScanRegion.style.textAlign = "center";
         parent.appendChild(qrCodeScanRegion);
-        this.insertCameraScanImageToScanRegion();
+        if (ScanTypeSelector.isCameraScanType(this.currentScanType)) {
+            this.insertCameraScanImageToScanRegion();
+        } else {
+            this.insertFileScanImageToScanRegion();
+        }
 
         const qrCodeDashboard = document.createElement("div");
         const dashboardId = this.getDashboardId();
@@ -405,7 +495,9 @@ export class Html5QrcodeScanner {
     private setupInitialDashboard(dashboard: HTMLElement) {
         this.createSection(dashboard);
         this.createSectionControlPanel();
-        this.createSectionSwap();
+        if (this.scanTypeSelector.hasMoreThanOneScanType()) {
+            this.createSectionSwap();
+        }
     }
 
     private createHeader(dashboard: HTMLElement) {
@@ -442,6 +534,7 @@ export class Html5QrcodeScanner {
         requestPermissionContainer: HTMLDivElement,
         requestPermissionButton?: HTMLButtonElement) {
         const $this = this;
+        $this.showHideScanTypeSwapLink(false);
         $this.setHeaderMessage(
             Html5QrcodeScannerStrings.cameraPermissionRequesting());
 
@@ -456,7 +549,7 @@ export class Html5QrcodeScanner {
             // By this point the user has granted camera permissions.
             $this.persistedDataManager.setHasPermission(
                 /* hasPermission */ true);
-
+            $this.showHideScanTypeSwapLink(true);
             $this.resetHeaderMessage();
             if (cameras && cameras.length > 0) {
                 scpCameraScanRegion.removeChild(requestPermissionContainer);
@@ -484,6 +577,7 @@ export class Html5QrcodeScanner {
             }
             $this.setHeaderMessage(
                 error, Html5QrcodeScannerStatus.STATUS_WARNING);
+            $this.showHideScanTypeSwapLink(true);
         });
     }
 
@@ -491,7 +585,9 @@ export class Html5QrcodeScanner {
         scpCameraScanRegion: HTMLDivElement,
         requestPermissionContainer: HTMLDivElement) {
         const $this = this;
-        const requestPermissionButton = document.createElement("button");
+        const requestPermissionButton = BaseUiElementFactory
+            .createElement<HTMLButtonElement>(
+                "button", this.getCameraPermissionButtonId());
         requestPermissionButton.innerText
             = Html5QrcodeScannerStrings.cameraPermissionTitle();
 
@@ -510,8 +606,11 @@ export class Html5QrcodeScanner {
         requestPermissionContainer: HTMLDivElement) {
         const $this = this;
 
-        if (this.persistedDataManager.hasCameraPermissions()) {
-            CameraManager.hasCameraPermissions().then(
+        // Only render last selected camera by default if the default scant type
+        // is camera.
+        if (ScanTypeSelector.isCameraScanType(this.currentScanType)
+            && this.persistedDataManager.hasCameraPermissions()) {
+            CameraPermissions.hasPermissions().then(
                 (hasPermissions: boolean) => {
                 if (hasPermissions) {
                     $this.createCameraListUi(
@@ -536,58 +635,50 @@ export class Html5QrcodeScanner {
     }
 
     private createSectionControlPanel() {
-        const $this = this;
         const section = document.getElementById(this.getDashboardSectionId())!;
         const sectionControlPanel = document.createElement("div");
         section.appendChild(sectionControlPanel);
         const scpCameraScanRegion = document.createElement("div");
         scpCameraScanRegion.id = this.getDashboardSectionCameraScanRegionId();
         scpCameraScanRegion.style.display
-            = this.currentScanType === Html5QrcodeScanType.SCAN_TYPE_CAMERA
-                ? "block" : "none";
+            = ScanTypeSelector.isCameraScanType(this.currentScanType)
+            ? "block" : "none";
         sectionControlPanel.appendChild(scpCameraScanRegion);
 
+        // Web browsers require the users to grant explicit permissions before
+        // giving camera access. We need to render a button to request user
+        // permission.
         // Assuming when the object is created permission is needed.
         const requestPermissionContainer = document.createElement("div");
         requestPermissionContainer.style.textAlign = "center";
         scpCameraScanRegion.appendChild(requestPermissionContainer);
-        this.createPermissionsUi(
-            scpCameraScanRegion, requestPermissionContainer);
 
-        const fileBasedScanRegion = document.createElement("div");
-        fileBasedScanRegion.id = this.getDashboardSectionFileScanRegionId();
-        fileBasedScanRegion.style.textAlign = "center";
-        fileBasedScanRegion.style.display
-            = this.currentScanType === Html5QrcodeScanType.SCAN_TYPE_CAMERA
-                ? "none" : "block";
-        sectionControlPanel.appendChild(fileBasedScanRegion);
+        // TODO(minhazav): If default scan type is file, the permission or
+        // camera access shouldn't start unless user explicitly switches to
+        // camera based scan. @priority: high.
 
-        const fileScanInput = document.createElement("input");
-        fileScanInput.id = this.getFileScanInputId();
-        fileScanInput.accept = "image/*";
-        fileScanInput.type = "file";
-        fileScanInput.style.width = "200px";
-        fileScanInput.disabled
-            = this.currentScanType === Html5QrcodeScanType.SCAN_TYPE_CAMERA;
-        const fileScanLabel = document.createElement("span");
-        fileScanLabel.innerText = " Select Image";
-        fileBasedScanRegion.appendChild(fileScanInput);
-        fileBasedScanRegion.appendChild(fileScanLabel);
-        fileScanInput.addEventListener("change", (e: any) => {
+        if (this.scanTypeSelector.isCameraScanRequired()) {
+            this.createPermissionsUi(
+                scpCameraScanRegion, requestPermissionContainer);
+        }
+
+        this.renderFileScanUi(sectionControlPanel);
+    }
+
+    private renderFileScanUi(parent: HTMLDivElement) {
+        let showOnRender = ScanTypeSelector.isFileScanType(
+            this.currentScanType);
+        const $this = this;
+        let onFileSelected: OnFileSelected = (file: File) => {
             if (!$this.html5Qrcode) {
                 throw "html5Qrcode not defined";
             }
 
-            if (e == null || e.target == null) {
+            if (!ScanTypeSelector.isFileScanType($this.currentScanType)) {
                 return;
             }
-            if ($this.currentScanType !== Html5QrcodeScanType.SCAN_TYPE_FILE) {
-                return;
-            }
-            if (e.target.files.length === 0) {
-                return;
-            }
-            const file = e.target.files[0];
+
+            $this.setHeaderMessage(Html5QrcodeScannerStrings.loadingImage());
             $this.html5Qrcode.scanFileV2(file, /* showImage= */ true)
                 .then((html5qrcodeResult: Html5QrcodeResult) => {
                     $this.resetHeaderMessage();
@@ -601,7 +692,10 @@ export class Html5QrcodeScanner {
                     $this.qrCodeErrorCallback!(
                         error, Html5QrcodeErrorFactory.createFrom(error));
                 });
-        });
+        };
+
+        this.fileSelectionUi = FileSelectionUi.create(
+            parent, showOnRender, onFileSelected);
     }
 
     private renderCameraSelection(cameras: Array<CameraDevice>) {
@@ -610,50 +704,90 @@ export class Html5QrcodeScanner {
             this.getDashboardSectionCameraScanRegionId())!;
         scpCameraScanRegion.style.textAlign = "center";
 
-        const cameraSelectionContainer = document.createElement("span");
-        cameraSelectionContainer.style.marginRight = "10px";
+        // Hide by default.
+        let cameraZoomUi: CameraZoomUi = CameraZoomUi.create(
+            scpCameraScanRegion, /* renderOnCreate= */ false);
+        const renderCameraZoomUiIfSupported
+            = (cameraCapabilities: CameraCapabilities) => {
+            let zoomCapability = cameraCapabilities.zoomFeature();
+            if (!zoomCapability.isSupported()) {
+                return;
+            }
 
-        const numCameras = cameras.length;
-        const cameraSelectionSelect = document.createElement("select");
-        if (numCameras === 1) {
-            // If only one camera is found, don't show camera selection.
-            cameraSelectionSelect.style.display = "none";
-        } else {
-            // Otherwise, show the number of cameras found as well.
-            const selectCameraString = Html5QrcodeScannerStrings.selectCamera();
-            cameraSelectionContainer.innerText
-                = `${selectCameraString} (${cameras.length})  `;
-        }
-        cameraSelectionSelect.id = this.getCameraSelectionId();
-        const options = [];
-        for (const camera of cameras) {
-            const value = camera.id;
-            const name = camera.label == null ? value : camera.label;
-            const option = document.createElement("option");
-            option.value = value;
-            option.innerText = name;
-            options.push(option);
-            cameraSelectionSelect.appendChild(option);
-        }
-        cameraSelectionContainer.appendChild(cameraSelectionSelect);
-        scpCameraScanRegion.appendChild(cameraSelectionContainer);
+            // Supported.
+            cameraZoomUi.setOnCameraZoomValueChangeCallback((zoomValue) => {
+                zoomCapability.apply(zoomValue);
+            });
+            let defaultZoom = 1;
+            if (this.config.defaultZoomValueIfSupported) {
+                defaultZoom = this.config.defaultZoomValueIfSupported;
+            }
+            defaultZoom = clip(
+                defaultZoom, zoomCapability.min(), zoomCapability.max());
+            cameraZoomUi.setValues(
+                zoomCapability.min(),
+                zoomCapability.max(),
+                defaultZoom,
+                zoomCapability.step(),
+            );
+            cameraZoomUi.show();
+        };
 
+        let cameraSelectUi: CameraSelectionUi = CameraSelectionUi.create(
+            scpCameraScanRegion, cameras);
+
+        // Camera Action Buttons.
         const cameraActionContainer = document.createElement("span");
-        const cameraActionStartButton = document.createElement("button");
+        const cameraActionStartButton
+            = BaseUiElementFactory.createElement<HTMLButtonElement>(
+                "button", PublicUiElementIdAndClasses.CAMERA_START_BUTTON_ID);
         cameraActionStartButton.innerText
             = Html5QrcodeScannerStrings.scanButtonStartScanningText();
         cameraActionContainer.appendChild(cameraActionStartButton);
 
-        const cameraActionStopButton = document.createElement("button");
+        const cameraActionStopButton
+            = BaseUiElementFactory.createElement<HTMLButtonElement>(
+                "button", PublicUiElementIdAndClasses.CAMERA_STOP_BUTTON_ID);
         cameraActionStopButton.innerText
             = Html5QrcodeScannerStrings.scanButtonStopScanningText();
         cameraActionStopButton.style.display = "none";
         cameraActionStopButton.disabled = true;
         cameraActionContainer.appendChild(cameraActionStopButton);
 
+        // Optional torch button support.
+        let torchButton: TorchButton;
+        const createAndShowTorchButtonIfSupported
+            = (cameraCapabilities: CameraCapabilities) => {
+            if (!cameraCapabilities.torchFeature().isSupported()) {
+                // Torch not supported, ignore.
+                if (torchButton) {
+                    torchButton.hide();
+                }
+                return;
+            }
+
+            if (!torchButton) {
+                torchButton = TorchButton.create(
+                    cameraActionContainer,
+                    cameraCapabilities.torchFeature(),
+                    { display: "none", marginLeft: "5px" },
+                    // Callback in case of torch action failure.
+                    (errorMessage) => {
+                        $this.setHeaderMessage(
+                            errorMessage,
+                            Html5QrcodeScannerStatus.STATUS_WARNING);
+                    }
+                );
+            } else {
+                torchButton.updateTorchCapability(
+                    cameraCapabilities.torchFeature());
+            }
+            torchButton.show();
+        };
+
         scpCameraScanRegion.appendChild(cameraActionContainer);
 
-        const resetCameraActionStarButton = (shouldShow: boolean) => {
+        const resetCameraActionStartButton = (shouldShow: boolean) => {
             if (!shouldShow) {
                 cameraActionStartButton.style.display = "none";
             }
@@ -671,14 +805,17 @@ export class Html5QrcodeScanner {
             // Update the UI.
             cameraActionStartButton.innerText
                 = Html5QrcodeScannerStrings.scanButtonScanningStarting();
-            cameraSelectionSelect.disabled = true;
+            cameraSelectUi.disable();
             cameraActionStartButton.disabled = true;
             cameraActionStartButton.style.opacity = "0.5";
-            $this.showHideScanTypeSwapLink(false);
-            $this.resetHeaderMessage();
+            // Swap link is available only when both scan types are required.
+            if (this.scanTypeSelector.hasMoreThanOneScanType()) {
+                $this.showHideScanTypeSwapLink(false);
+            }
+            $this.resetHeaderMessage();            
 
             // Attempt starting the camera.
-            const cameraId = cameraSelectionSelect.value;
+            const cameraId = cameraSelectUi.getValue();
             $this.persistedDataManager.setLastUsedCameraId(cameraId);
 
             $this.html5Qrcode!.start(
@@ -689,18 +826,30 @@ export class Html5QrcodeScanner {
                 .then((_) => {
                     cameraActionStopButton.disabled = false;
                     cameraActionStopButton.style.display = "inline-block";
-                    resetCameraActionStarButton(/* shouldShow= */ false);
+                    resetCameraActionStartButton(/* shouldShow= */ false);
+
+                    const cameraCapabilities
+                        = $this.html5Qrcode!.getRunningTrackCameraCapabilities();
+
+                    // Show torch button if needed.
+                    if (this.config.showTorchButtonIfSupported === true) {
+                        createAndShowTorchButtonIfSupported(cameraCapabilities);
+                    }
+                    // Show zoom slider if needed.
+                    if (this.config.showZoomSliderIfSupported === true) {
+                        renderCameraZoomUiIfSupported(cameraCapabilities);
+                    }
                 })
                 .catch((error) => {
                     $this.showHideScanTypeSwapLink(true);
-                    cameraSelectionSelect.disabled = false;
-                    resetCameraActionStarButton(/* shouldShow= */ true);
+                    cameraSelectUi.enable();
+                    resetCameraActionStartButton(/* shouldShow= */ true);
                     $this.setHeaderMessage(
                         error, Html5QrcodeScannerStatus.STATUS_WARNING);
                 });
         });
 
-        if (numCameras === 1) {
+        if (cameraSelectUi.hasSingleItem()) {
             // If there is only one camera, start scanning directly.
             cameraActionStartButton.click();
         }
@@ -712,11 +861,23 @@ export class Html5QrcodeScanner {
             cameraActionStopButton.disabled = true;
             $this.html5Qrcode.stop()
                 .then((_) => {
-                    $this.showHideScanTypeSwapLink(true);
-                    cameraSelectionSelect.disabled = false;
+                    // Swap link is required if more than one scan types are
+                    // required.
+                    if(this.scanTypeSelector.hasMoreThanOneScanType()) {
+                        $this.showHideScanTypeSwapLink(true);
+                    }
+                    
+                    cameraSelectUi.enable();
                     cameraActionStartButton.disabled = false;
                     cameraActionStopButton.style.display = "none";
                     cameraActionStartButton.style.display = "inline-block";
+                    // Reset torch state.
+                    if (torchButton) {
+                        torchButton.reset();
+                        torchButton.hide();
+                    }
+                    cameraZoomUi.removeOnCameraZoomValueChangeCallback();
+                    cameraZoomUi.hide();
                     $this.insertCameraScanImageToScanRegion();
                 }).catch((error) => {
                     cameraActionStopButton.disabled = false;
@@ -726,17 +887,9 @@ export class Html5QrcodeScanner {
         });
 
         if ($this.persistedDataManager.getLastUsedCameraId()) {
-            const cameraId = $this.persistedDataManager.getLastUsedCameraId();
-            let cameraFound = false;
-            for (const option of options) {
-                if (option.value === cameraId) {
-                    cameraFound = true;
-                    break;
-                }
-            }
-
-            if (cameraFound) {
-                cameraSelectionSelect.value = cameraId!;
+            const cameraId = $this.persistedDataManager.getLastUsedCameraId()!;
+            if (cameraSelectUi.hasValue(cameraId)) {
+                cameraSelectUi.setValue(cameraId);
                 cameraActionStartButton.click();
             } else {
                 $this.persistedDataManager.resetLastUsedCameraId();
@@ -751,17 +904,20 @@ export class Html5QrcodeScanner {
         const TEXT_IF_FILE_SCAN_SELECTED
             = Html5QrcodeScannerStrings.textIfFileScanSelected();
 
+        // TODO(minhaz): Export this as an UI element.
         const section = document.getElementById(this.getDashboardSectionId())!;
         const switchContainer = document.createElement("div");
         switchContainer.style.textAlign = "center";
-        const swithToFileBasedLink = document.createElement("a");
-        swithToFileBasedLink.style.textDecoration = "underline";
-        swithToFileBasedLink.id = this.getDashboardSectionSwapLinkId();
-        swithToFileBasedLink.innerText
-            = this.currentScanType === Html5QrcodeScanType.SCAN_TYPE_CAMERA
-                ? TEXT_IF_CAMERA_SCAN_SELECTED : TEXT_IF_FILE_SCAN_SELECTED;
-        swithToFileBasedLink.href = "#scan-using-file";
-        swithToFileBasedLink.addEventListener("click", function () {
+        const switchScanTypeLink
+            = BaseUiElementFactory.createElement<HTMLAnchorElement>(
+                "span", this.getDashboardSectionSwapLinkId());
+        switchScanTypeLink.style.textDecoration = "underline";
+        switchScanTypeLink.style.cursor = "pointer";
+        switchScanTypeLink.innerText
+            = ScanTypeSelector.isCameraScanType(this.currentScanType)
+            ? TEXT_IF_CAMERA_SCAN_SELECTED : TEXT_IF_FILE_SCAN_SELECTED;
+        switchScanTypeLink.addEventListener("click", function () {
+            // TODO(minhazav): Abstract this to a different library.
             if (!$this.sectionSwapAllowed) {
                 if ($this.verbose) {
                     $this.logger.logError(
@@ -772,34 +928,63 @@ export class Html5QrcodeScanner {
 
             // Cleanup states
             $this.resetHeaderMessage();
-            $this.getFileScanInput().value = "";
-
+            $this.fileSelectionUi!.resetValue();
             $this.sectionSwapAllowed = false;
             
-            if ($this.currentScanType === Html5QrcodeScanType.SCAN_TYPE_CAMERA) {
-                // swap to file
+            if (ScanTypeSelector.isCameraScanType($this.currentScanType)) {
+                // Swap to file based scanning.
                 $this.clearScanRegion();
-                $this.getFileScanInput().disabled = false;
                 $this.getCameraScanRegion().style.display = "none";
-                $this.getFileScanRegion().style.display = "block";
-                swithToFileBasedLink.innerText = TEXT_IF_FILE_SCAN_SELECTED;
+                $this.fileSelectionUi!.show();
+                switchScanTypeLink.innerText = TEXT_IF_FILE_SCAN_SELECTED;
                 $this.currentScanType = Html5QrcodeScanType.SCAN_TYPE_FILE;
                 $this.insertFileScanImageToScanRegion();
             } else {
-                // swap to camera based scanning.
+                // Swap to camera based scanning.
                 $this.clearScanRegion();
-                $this.getFileScanInput().disabled = true;
                 $this.getCameraScanRegion().style.display = "block";
-                $this.getFileScanRegion().style.display = "none";
-                swithToFileBasedLink.innerText = TEXT_IF_CAMERA_SCAN_SELECTED;
+                $this.fileSelectionUi!.hide();
+                switchScanTypeLink.innerText = TEXT_IF_CAMERA_SCAN_SELECTED;
                 $this.currentScanType = Html5QrcodeScanType.SCAN_TYPE_CAMERA;
                 $this.insertCameraScanImageToScanRegion();
+
+                $this.startCameraScanIfPermissionExistsOnSwap();
             }
 
             $this.sectionSwapAllowed = true;
         });
-        switchContainer.appendChild(swithToFileBasedLink);
+        switchContainer.appendChild(switchScanTypeLink);
         section.appendChild(switchContainer);
+    }
+
+    // Start camera scanning automatically when swapping to camera based scan
+    // if set in config and has permission.
+    private startCameraScanIfPermissionExistsOnSwap() {
+        const $this = this;
+        if (this.persistedDataManager.hasCameraPermissions()) {
+            CameraPermissions.hasPermissions().then(
+                (hasPermissions: boolean) => {
+                if (hasPermissions) {
+                    // Start feed.
+                    // Assuming at this point the permission button exists.
+                    let permissionButton = document.getElementById(
+                        $this.getCameraPermissionButtonId());
+                    if (!permissionButton) {
+                        this.logger.logError(
+                            "Permission button not found, fail;");
+                        throw "Permission button not found";
+                    }
+                    permissionButton.click();
+                } else {
+                    $this.persistedDataManager.setHasPermission(
+                        /* hasPermission */ false);
+                }
+            }).catch((_: any) => {
+                $this.persistedDataManager.setHasPermission(
+                    /* hasPermission */ false);
+            });
+            return;
+        }
     }
 
     private resetHeaderMessage() {
@@ -820,29 +1005,31 @@ export class Html5QrcodeScanner {
 
         switch (scannerStatus) {
             case Html5QrcodeScannerStatus.STATUS_SUCCESS:
-                messageDiv.style.background = "#6aaf5042";
+                messageDiv.style.background = "rgba(106, 175, 80, 0.26)";
                 messageDiv.style.color = "#477735";
                 break;
             case Html5QrcodeScannerStatus.STATUS_WARNING:
-                messageDiv.style.background = "#cb243124";
+                messageDiv.style.background = "rgba(203, 36, 49, 0.14)";
                 messageDiv.style.color = "#cb2431";
                 break;
             case Html5QrcodeScannerStatus.STATUS_DEFAULT:
             default:
-                messageDiv.style.background = "#00000000";
+                messageDiv.style.background = "rgba(0, 0, 0, 0)";
                 messageDiv.style.color = "rgb(17, 17, 17)";
                 break;
         }
     }
 
     private showHideScanTypeSwapLink(shouldDisplay?: boolean) {
-        if (shouldDisplay !== true) {
-            shouldDisplay = false;
-        }
+        if (this.scanTypeSelector.hasMoreThanOneScanType()) {
+            if (shouldDisplay !== true) {
+                shouldDisplay = false;
+            }
 
-        this.sectionSwapAllowed = shouldDisplay;
-        this.getDashboardSectionSwapLink().style.display
-            = shouldDisplay ? "inline-block" : "none";
+            this.sectionSwapAllowed = shouldDisplay;
+            this.getDashboardSectionSwapLink().style.display
+                = shouldDisplay ? "inline-block" : "none";
+        }
     }
 
     private insertCameraScanImageToScanRegion() {
@@ -864,6 +1051,7 @@ export class Html5QrcodeScanner {
         this.cameraScanImage.width = 64;
         this.cameraScanImage.style.opacity = "0.8";
         this.cameraScanImage.src = ASSET_CAMERA_SCAN;
+        this.cameraScanImage.alt = Html5QrcodeScannerStrings.cameraScanAltText();
     }
 
     private insertFileScanImageToScanRegion() {
@@ -885,6 +1073,7 @@ export class Html5QrcodeScanner {
         this.fileScanImage.width = 64;
         this.fileScanImage.style.opacity = "0.8";
         this.fileScanImage.src = ASSET_FILE_SCAN;
+        this.fileScanImage.alt = Html5QrcodeScannerStrings.fileScanAltText();
     }
 
     private clearScanRegion() {
@@ -902,12 +1091,8 @@ export class Html5QrcodeScanner {
         return `${this.elementId}__dashboard_section_csr`;
     }
 
-    private getDashboardSectionFileScanRegionId(): string {
-        return `${this.elementId}__dashboard_section_fsr`;
-    }
-
     private getDashboardSectionSwapLinkId(): string {
-        return `${this.elementId}__dashboard_section_swaplink`;
+        return PublicUiElementIdAndClasses.SCAN_TYPE_CHANGE_ANCHOR_ID;
     }
 
     private getScanRegionId(): string {
@@ -918,35 +1103,17 @@ export class Html5QrcodeScanner {
         return `${this.elementId}__dashboard`;
     }
 
-    private getFileScanInputId(): string {
-        return `${this.elementId}__filescan_input`;
-    }
-
-    private getStatusSpanId(): string {
-        return `${this.elementId}__status_span`;
-    }
-
     private getHeaderMessageContainerId(): string {
         return `${this.elementId}__header_message`;
     }
 
-    private getCameraSelectionId(): string {
-        return `${this.elementId}__camera_selection`;
+    private getCameraPermissionButtonId(): string {
+        return PublicUiElementIdAndClasses.CAMERA_PERMISSION_BUTTON_ID;
     }
 
     private getCameraScanRegion(): HTMLElement {
         return document.getElementById(
             this.getDashboardSectionCameraScanRegionId())!;
-    }
-
-    private getFileScanRegion(): HTMLElement {
-        return document.getElementById(
-            this.getDashboardSectionFileScanRegionId())!;
-    }
-
-    private getFileScanInput(): HTMLInputElement {
-        return <HTMLInputElement>document.getElementById(
-            this.getFileScanInputId())!;
     }
 
     private getDashboardSectionSwapLink(): HTMLElement {

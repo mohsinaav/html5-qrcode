@@ -41,6 +41,10 @@ export class Html5QrcodeStrings {
         return "Camera access is only supported in secure context like https "
         + "or localhost.";
     }
+
+    public static scannerPaused(): string {
+        return "Scanner paused";
+    }
 }
 
 /**
@@ -98,6 +102,22 @@ export class Html5QrcodeScannerStrings {
         return "Start Scanning";
     }
 
+    public static torchOnButton(): string {
+        return "Switch On Torch";
+    }
+
+    public static torchOffButton(): string {
+        return "Switch Off Torch";
+    }
+
+    public static torchOnFailedMessage(): string {
+        return "Failed to turn on torch";
+    }
+
+    public static torchOffFailedMessage(): string {
+        return "Failed to turn off torch";
+    }
+
     public static scanButtonScanningStarting(): string {
         return "Launching Camera...";
     }
@@ -123,13 +143,55 @@ export class Html5QrcodeScannerStrings {
     public static selectCamera(): string {
         return "Select Camera";
     }
+
+    public static fileSelectionChooseImage(): string {
+        return "Choose Image";
+    }
+
+    public static fileSelectionChooseAnother(): string {
+        return "Choose Another";
+    }
+
+    public static fileSelectionNoImageSelected(): string {
+        return "No image choosen";
+    }
+
+    /** Prefix to be given to anonymous cameras. */
+    public static anonymousCameraPrefix(): string {
+        return "Anonymous Camera";
+    }
+
+    public static dragAndDropMessage(): string {
+        return "Or drop an image to scan";
+    }
+
+    public static dragAndDropMessageOnlyImages(): string {
+        return "Or drop an image to scan (other files not supported)";
+    }
+
+    /** Value for zoom. */
+    public static zoom(): string {
+        return "zoom";
+    }
+
+    public static loadingImage(): string {
+        return "Loading image...";
+    }
+
+    public static cameraScanAltText(): string {
+        return "Camera based scan";
+    }
+
+    public static fileScanAltText(): string {
+        return "Fule based scan";
+    }
 }
 
 /** Strings used in {@class LibraryInfoDiv} */
 export class LibraryInfoStrings {
 
-    public static builtUsing(): string {
-        return "Built using ";
+    public static poweredBy(): string {
+        return "Powered by ";
     }
 
     public static reportIssues(): string {

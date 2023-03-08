@@ -87,6 +87,9 @@ export class Html5QrcodeConstants {
     static SCAN_DEFAULT_FPS = 2;
     static DEFAULT_DISABLE_FLIP = false;
     static DEFAULT_REMEMBER_LAST_CAMERA_USED = true;
+    static DEFAULT_SUPPORTED_SCAN_TYPE = [
+        Html5QrcodeScanType.SCAN_TYPE_CAMERA,
+        Html5QrcodeScanType.SCAN_TYPE_FILE];
 }
 
 /** Defines dimension for QR Code Scanner. */
@@ -94,6 +97,15 @@ export interface QrDimensions {
     width: number;
     height: number;
 }
+
+/**
+ * A function that takes in the width and height of the video stream 
+ * and returns QrDimensions.
+ * 
+ * Viewfinder refers to the video showing camera stream.
+ */
+export type QrDimensionFunction =
+    (viewfinderWidth: number, viewfinderHeight: number) => QrDimensions;
 
 /**
  * Defines bounds of detected QR code w.r.t the scan region.
@@ -128,6 +140,13 @@ export class QrcodeResultFormat {
     }
 }
 
+/** Data class for QR code result used for debugging. */
+export interface QrcodeResultDebugData {
+
+    /** Name of the decoder that was used for decoding. */
+    decoderName?: string;
+}
+
 /**
  * Detailed scan result.
  */
@@ -153,6 +172,9 @@ export interface QrcodeResult {
      * Note: this is experimental, and not fully supported.
      */
     decodedTextType?: DecodedTextType;
+
+    /** Data class for QR code result used for debugging. */
+    debugData?: QrcodeResultDebugData;
 }
 
 /**
@@ -228,12 +250,6 @@ export type QrcodeSuccessCallback
 export type QrcodeErrorCallback
     = (errorMessage: string, error: Html5QrcodeError) => void;
 
-/** Camera Device interface. */
-export interface CameraDevice {
-    id: string;
-    label: string;
-}
-
 /** Code decoder interface. */
 export interface QrcodeDecoderAsync {
     /**
@@ -242,6 +258,24 @@ export interface QrcodeDecoderAsync {
      * @param canvas a valid html5 canvas element.
      */
     decodeAsync(canvas: HTMLCanvasElement): Promise<QrcodeResult>;
+}
+
+/**
+ * Code robust decoder interface.
+ * 
+ * <p> A robust decoder may sacrifice latency of scanning for scanning quality.
+ * Ideal for file scan kind of operation.
+ */
+export interface RobustQrcodeDecoderAsync extends QrcodeDecoderAsync {
+    /**
+     * Decodes content of the canvas to find a valid QR code or bar code.
+     * 
+     * <p>The method implementation will run the decoder more robustly at the
+     * expense of latency.
+     * 
+     * @param canvas a valid html5 canvas element.
+     */
+    decodeRobustlyAsync(canvas: HTMLCanvasElement): Promise<QrcodeResult>;
 }
 
 /** Interface for logger. */
@@ -303,5 +337,17 @@ export class BaseLoggger implements Logger {
 /** Returns true if the {@param obj} is null or undefined. */
 export function isNullOrUndefined(obj?: any) {
     return (typeof obj === "undefined") || obj === null;
+}
+
+/** Clips the {@code value} between {@code minValue} and {@code maxValue}. */
+export function clip(value: number, minValue: number, maxValue: number) {
+    if (value > maxValue) {
+        return maxValue;
+    }
+    if (value < minValue) {
+        return minValue;
+    }
+
+    return value;
 }
 //#endregion
